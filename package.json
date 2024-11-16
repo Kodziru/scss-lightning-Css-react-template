@@ -1,0 +1,31 @@
+{
+    "name": "gta-portfolio",
+    "private": true,
+    "version": "0.0.0",
+    "type": "module",
+    "scripts": {
+        "dev": "concurrently \"npm run dev\" \"npm run dev:css\"",
+        "build": "vite build && npm run build:css",
+        "lint": "eslint .",
+        "preview": "vite preview",
+        "dev:css": "sass --watch src/styles/scss:src/styles/css",
+        "build:css": "sass src/styles/scss:src/styles/css --style compressed"
+    },
+    "dependencies": {
+        "react": "^18.3.1",
+        "react-dom": "^18.3.1"
+    },
+    "devDependencies": {
+        "@eslint/js": "^9.13.0",
+        "@types/react": "^18.3.12",
+        "@types/react-dom": "^18.3.1",
+        "@vitejs/plugin-react": "^4.3.3",
+        "eslint": "^9.13.0",
+        "eslint-plugin-react": "^7.37.2",
+        "eslint-plugin-react-hooks": "^5.0.0",
+        "eslint-plugin-react-refresh": "^0.4.14",
+        "globals": "^15.11.0",
+        "sass-embedded": "^1.81.0",
+        "vite": "^5.4.10"
+    }
+}
