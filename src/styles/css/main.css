@@ -1,0 +1,104 @@
+:root {
+  /* Font settings */
+  --font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  --font-line-height: 1.5;
+  --font-weight: 400;
+  --heading-font-size: 3.2em;
+  --heading-line-height: 1.1;
+  /* Color scheme */
+  --color-scheme-light: #213547;
+  --color-scheme-dark: rgba(255, 255, 255, 0.87);
+  --background-light: #ffffff;
+  --background-dark: #242424;
+  /* Link colors */
+  --link-color: #646cff;
+  --link-hover-color-light: #747bff;
+  --link-hover-color-dark: #535bf2;
+  /* Button settings */
+  --button-bg-light: #f9f9f9;
+  --button-bg-dark: #1a1a1a;
+  --button-border-radius: 8px;
+  --button-padding: 0.6em 1.2em;
+  --button-font-size: 1em;
+  --button-font-weight: 500;
+  --button-border-color-hover: #646cff;
+  --button-focus-outline: 4px auto -webkit-focus-ring-color;
+  /* General settings */
+  --min-width: 320px;
+  --min-height: 100vh;
+}
+
+:root {
+  font-family: var(--font-family);
+  line-height: var(--font-line-height);
+  font-weight: var(--font-weight);
+  color-scheme: light dark;
+  color: var(--color-scheme-dark);
+  background-color: var(--background-dark);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@font-face {
+  font-family: "pricedown";
+  src: url("@assets/fonts/pricedownbl.otf") format("otf");
+  font-weight: 400;
+  font-style: normal;
+}
+a {
+  font-weight: var(--font-weight);
+  color: var(--link-color);
+  text-decoration: inherit;
+}
+a:hover {
+  color: var(--link-hover-color-dark);
+}
+
+body {
+  margin: 0 auto;
+  display: flex;
+  place-items: center;
+  justify-content: center;
+  min-width: var(--min-width);
+  min-height: var(--min-height);
+}
+
+h1 {
+  font-size: var(--heading-font-size);
+  line-height: var(--heading-line-height);
+}
+
+button {
+  border-radius: var(--button-border-radius);
+  border: 1px solid transparent;
+  padding: var(--button-padding);
+  font-size: var(--button-font-size);
+  font-weight: var(--button-font-weight);
+  font-family: inherit;
+  background-color: var(--button-bg-dark);
+  cursor: pointer;
+  transition: border-color 0.25s;
+}
+button:hover {
+  border-color: var(--button-border-color-hover);
+}
+button:focus, button:focus-visible {
+  outline: var(--button-focus-outline);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color: var(--color-scheme-light);
+    background-color: var(--background-light);
+  }
+  a:hover {
+    color: var(--link-hover-color-light);
+  }
+  button {
+    background-color: var(--button-bg-light);
+  }
+}
+
+/*# sourceMappingURL=main.css.map */
