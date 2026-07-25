@@ -87,8 +87,8 @@ export const PROFILES = {
     // nommage — propre au profil (Partie B)
     naming: { kind: 'counter', pattern: 'IMG_%04d', digits: 4, ext: '.JPG', case: 'upper' },
 
-    // ancrage géographique par défaut, surchargeable
-    defaultLocation: 'paris',
+    // ancrage géographique : position réelle par défaut, surchargeable (voir 2.2)
+    location: { source: 'device', precision: 'coarse', cached: null },
 
     // état persistant du compte
     counter: null,                // rempli à la première utilisation
@@ -108,7 +108,8 @@ Ce qui appartient au profil, et ce qui n'y appartient pas :
 | Optique de référence | profil |
 | Schéma de nommage, extension, casse | profil |
 | Compteur de pellicule | profil, **persistant** |
-| Localisation par défaut | profil, surchargeable par lot |
+| Source et précision de localisation | profil, surchargeable par lot |
+| Position détectée en cache | profil, **persistant** |
 | Rafales, écarts, fenêtre diurne, ancrage | **global** — voir Partie A |
 
 ### 2.1 L'optique doit varier d'une prise à l'autre
@@ -133,17 +134,85 @@ Les valeurs du profil sont donc des **références**, dérivées par prise à pa
 Dans une même rafale (3 min d'écart), les valeurs restent très proches — même palier ISO, gigue minime. C'est
 entre deux rafales séparées de cinq heures que l'écart doit être franc.
 
-### 2.2 La localisation aussi
+### 2.2 Localisation : position réelle par défaut
 
-Deux images d'un même lot ne peuvent pas porter des coordonnées GPS identiques à la décimale : un vrai
-téléphone redonne une position légèrement différente à chaque prise. Depuis `defaultLocation`, appliquer :
+Le catalogue de 5 villes en dur est le mauvais défaut. Une photo d'un compte français ancrée à Tokyo est
+incohérente avec tout le reste — langue du système, fuseau, heures de la chronologie. **Par défaut, le profil
+utilise la position réelle de l'utilisateur**, détectée automatiquement.
+
+#### Chaîne de résolution
+
+Quatre sources, par ordre de priorité. La première qui aboutit gagne :
+
+| Priorité | Source | Déclencheur |
+|---|---|---|
+| 1 | **Position réelle** — `navigator.geolocation` | défaut, détection automatique |
+| 2 | **Adresse saisie** par l'utilisateur → géocodage | refus du navigateur, ou saisie manuelle choisie |
+| 3 | **Ville du catalogue** `SPOOF_LOCATIONS` | choix explicite d'une autre localisation |
+| 4 | **Coordonnées brutes** `customLocation` | déjà présent dans `ProcessOptions` |
+
+L'utilisateur garde donc toujours la main : le défaut est sa propre position, mais il peut **choisir une adresse
+différente** à tout moment, et le champ `customLocation` de `ProcessOptions` sert déjà de point d'entrée pour
+les niveaux 3 et 4.
+
+```js
+location: {
+  source: 'device',        // 'device' | 'address' | 'catalog' | 'custom'
+  precision: 'coarse',     // voir plus bas
+  cached: null,            // { lat, lng, label } mémorisé par profil
+}
+```
+
+#### Consentement et échecs
+
+`navigator.geolocation` exige un **consentement explicite du navigateur** et ne fonctionne qu'en HTTPS ou sur
+`localhost`. Trois cas à gérer, aucun ne doit bloquer le traitement :
+
+- **Accordé** → on garde les coordonnées en cache dans le profil ; la permission n'est pas redemandée au lot
+  suivant.
+- **Refusé** → bascule silencieuse sur la saisie d'adresse (niveau 2). Pas de relance de la demande : un
+  navigateur qui a refusé une fois refusera tant que l'utilisateur n'agit pas lui-même.
+- **Indisponible / expiré** (`timeout`, pas de capteur, contexte non sécurisé) → même bascule.
+
+Le traitement des images n'est jamais suspendu par l'absence de position : sans aucune source résolue, le mode
+`spoof` écrit simplement les IFD sans bloc GPS, ce que fait déjà le code (`if (loc)`, ligne 159).
+
+#### Précision volontairement dégradée
+
+C'est le point à trancher consciemment. `navigator.geolocation` renvoie une position à quelques mètres près :
+écrite telle quelle dans l'EXIF, elle **désigne le domicile** de l'utilisateur dans chaque fichier exporté.
+Pour un outil dont la raison d'être est de retirer les métadonnées identifiantes, publier une position exacte
+va à l'encontre du but.
+
+Trois niveaux, `coarse` par défaut :
+
+| Niveau | Traitement | Résultat |
+|---|---|---|
+| `exact` | coordonnées brutes | position au mètre — **à réserver à un choix explicite** |
+| `coarse` | arrondi à ~1–3 km | le quartier, pas l'adresse — **défaut** |
+| `city` | recentrage sur le centroïde de la ville détectée | la ville seulement |
+
+`coarse` conserve la plausibilité recherchée — les photos ont l'air prises là où vit la personne — sans livrer
+son adresse. Le passage en `exact` doit être un geste délibéré de l'utilisateur, pas une valeur par défaut.
+
+#### Géocodage d'adresse
+
+Le niveau 2 demande de transformer une adresse en coordonnées, ce qui suppose un service externe (Nominatim /
+OSM par exemple). Deux conséquences à assumer : l'adresse saisie **sort de la machine** vers un tiers, et
+l'app perd son caractère entièrement local. Une alternative sans requête réseau est de limiter la saisie à un
+choix de ville dans une liste embarquée élargie — moins souple, mais rien ne quitte le navigateur. Non tranché.
+
+#### Variation par prise
+
+Quelle que soit la source retenue, deux images d'un lot ne peuvent pas porter des coordonnées identiques à la
+décimale : un vrai téléphone redonne une position légèrement différente à chaque prise.
 
 - **Dans une rafale** : gigue de ±20 m environ — la personne n'a pas bougé, seul le GPS a dérivé.
 - **Entre deux rafales** : dérive de quelques centaines de mètres à quelques kilomètres — cinq heures ont
   passé, la personne s'est déplacée.
 
-Le `defaultLocation` du profil reste le point d'ancrage : un compte iPhone basé à Paris produit des lots
-cohérents autour de Paris, jamais un lot à Tokyo suivi d'un lot à Londres.
+Le point d'ancrage du profil reste stable : un compte ancré sur la position réelle produit des lots cohérents
+autour de cette position, jamais un lot ici suivi d'un lot à l'autre bout du monde.
 
 # Partie A — Chronologie du lot
 
@@ -504,7 +573,18 @@ L'étape 4 doit consommer la même valeur pour les deux sorties. Si le nom est c
 - [ ] Dans une rafale : même palier ISO, valeurs proches mais non identiques.
 - [ ] Deux images d'un lot n'ont jamais des coordonnées GPS identiques à la décimale.
 - [ ] Gigue GPS de ~20 m dans une rafale, dérive plus large entre rafales.
-- [ ] Le profil impose son `defaultLocation` tant qu'aucune surcharge explicite n'est fournie.
+
+**Localisation**
+
+- [ ] Sans configuration, le profil demande la position réelle — `source: 'device'` est le défaut.
+- [ ] Permission accordée → position mise en cache, non redemandée au lot suivant.
+- [ ] Permission refusée → bascule sur la saisie d'adresse, aucune relance de la demande.
+- [ ] Contexte non sécurisé (HTTP) ou `timeout` → même bascule, sans erreur visible.
+- [ ] Aucune source résolue → images traitées quand même, sans bloc GPS.
+- [ ] `precision: 'coarse'` par défaut : coordonnées arrondies, jamais l'adresse exacte.
+- [ ] `precision: 'exact'` inatteignable sans action explicite de l'utilisateur.
+- [ ] Choix d'une adresse différente → elle l'emporte sur la position détectée.
+- [ ] Le choix de source est mémorisé par profil et n'affecte pas les autres profils.
 
 **Cloisonnement des profils**
 
@@ -525,6 +605,12 @@ L'étape 4 doit consommer la même valeur pour les deux sorties. Si le nom est c
 - **`Flash` est câblé à `16`** (ligne 155), c'est-à-dire « flash n'a pas déclenché ». Combiné à 2.1, une prise
   de 21 h 30 avec un ISO monté à 800 et un flash déclaré éteint reste cohérente — mais si la courbe de lumière
   est un jour poussée plus loin, la valeur devra suivre (`25` = flash déclenché). Non traité pour l'instant.
-- **`SPOOF_LOCATIONS` reste un catalogue de 5 villes.** Les profils y pointent par clé ; si deux profils
-  partagent `defaultLocation: 'paris'`, leurs lots se ressembleront géographiquement. Attribuer une ville
-  distincte par profil est le choix par défaut recommandé.
+- **`SPOOF_LOCATIONS` devient un niveau de repli**, plus le défaut. Les 5 villes restent utiles comme choix
+  explicite (niveau 3 de la chaîne 2.2) mais ne servent plus de valeur initiale.
+- **Géocodage d'adresse** : à trancher entre un service externe (l'adresse sort du navigateur) et une liste de
+  villes embarquée élargie (rien ne sort, moins souple). Voir 2.2.
+- **Cohérence fuseau / position.** La chronologie utilise les accesseurs locaux (`getHours()`), donc l'heure
+  écrite suit le fuseau de la machine. Tant que la position est celle de l'utilisateur, les deux concordent.
+  Si l'utilisateur choisit une adresse à l'autre bout du monde, une photo « prise » à 11 h là-bas portera
+  l'heure locale d'ici — incohérence réelle, non traitée. Recentrer la chronologie sur le fuseau de la
+  localisation choisie serait la correction.
