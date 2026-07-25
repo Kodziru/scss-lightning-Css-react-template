@@ -31,6 +31,37 @@ Deux défauts que ce document corrige :
 
 ---
 
+## 1. Séparation des responsabilités
+
+Deux couches indépendantes, et il faut qu'elles le restent :
+
+| | Couche | Dépend de l'appareil ? |
+|---|---|---|
+| **A** | Chronologie du lot — rafales, écarts, fenêtre diurne, ancrage | **Non** — identique pour les 5 profils |
+| **B** | Nommage — préfixe, format, compteur | **Oui** — propre à chaque profil |
+
+La chronologie est **la même pour tout le monde**. Un lot de 9 images produit exactement la même structure
+temporelle qu'il soit traité en profil Samsung, iPhone, Pixel, Sony ou Canon : 3 rafales, 3-4 min à
+l'intérieur, écarts resserrés à ~5 h, tout entre `10:23` et `21:46`, sur une seule journée. `buildBatchTimeline`
+ne reçoit jamais le nom de l'appareil — c'est volontaire, et c'est ce qui garantit qu'un profil ne puisse pas
+diverger d'un autre par accident.
+
+Seule la couche B lit `options.spoofDevice`. Le profil choisi décide du préfixe et de rien d'autre :
+
+```
+buildBatchTimeline(9)  ──►  [ 9 Date ]  ── identique pour tous les profils
+                                │
+        ┌───────────────────────┼───────────────────────┐
+        ▼                       ▼                       ▼
+   profil samsung          profil iphone            profil pixel
+   20260724_110412.jpg     IMG_3421.JPG             PXL_20260724_110412381.jpg
+   20260724_110735.jpg     IMG_3422.JPG             PXL_20260724_110735204.jpg
+   20260724_111048.jpg     IMG_3423.JPG             PXL_20260724_111048917.jpg
+```
+
+Mêmes instants, trois habillages. Ajouter un sixième profil à `SPOOF_DEVICES` = ajouter une ligne au catalogue
+B.2, sans toucher une seule ligne de la chronologie.
+
 # Partie A — Chronologie du lot
 
 ## A.1 Modèle
@@ -246,9 +277,40 @@ Un `i + 1` naïf produit `IMG_0001, IMG_0002, IMG_0003` — c'est le motif d'un 
 la suite parfaitement contiguë est le détail qui trahit le lot généré. Le vrai comportement iOS :
 
 **Le compteur est celui de la pellicule, pas celui du lot.** Il vit sur toute la durée de vie de l'appareil et
-s'incrémente à chaque capture — photos, captures d'écran, images enregistrées. Valeur de départ tirée **une
-fois par lot**, dans `[0800, 6500]` : sous ~200 on lit un téléphone neuf, au-delà de ~9500 on lit un compteur
-au bord du bouclage. Les deux extrêmes sont rares dans la vraie vie, donc suspects.
+s'incrémente à chaque capture — photos, captures d'écran, images enregistrées. Valeur initiale tirée dans
+`[0800, 6500]` : sous ~200 on lit un téléphone neuf, au-delà de ~9500 un compteur au bord du bouclage. Les deux
+extrêmes sont rares dans la vraie vie, donc suspects.
+
+**Il persiste d'un lot à l'autre, par profil.** C'est la conséquence directe de traiter un appareil comme un
+profil et non comme une option ponctuelle. Un vrai iPhone ne remet pas son compteur à zéro entre deux séances :
+si un premier lot se termine à `IMG_3443`, le lot suivant en profil iPhone doit reprendre autour de
+`IMG_3450`, pas repartir sur un `IMG_5100` tiré au hasard. Deux lots censés venir du même téléphone avec des
+compteurs incohérents, c'est la contradiction la plus facile à repérer quand on les met côte à côte.
+
+Le compteur est donc un **état par profil**, tiré à la première utilisation puis conservé :
+
+```js
+// une entrée par profil : { iphone15: 3443, s25ultra: null, sonyA7: 12904, ... }
+const KEY = 'metapurge.counters';
+
+function nextCounterStart(device) {
+  const store = JSON.parse(localStorage.getItem(KEY) ?? '{}');
+  const saved = store[device];
+  // première utilisation du profil : on tire ; sinon on reprend où on s'était arrêté
+  return saved ?? 800 + Math.floor(Math.random() * 5700);
+}
+
+function saveCounter(device, last) {
+  const store = JSON.parse(localStorage.getItem(KEY) ?? '{}');
+  // écart plausible entre deux séances : quelques dizaines de photos hors lot
+  store[device] = ((last + 5 + Math.floor(Math.random() * 40) - 1) % 9999) + 1;
+  localStorage.setItem(KEY, JSON.stringify(store));
+}
+```
+
+Chaque profil a sa propre entrée : le compteur Sony avance sans rien devoir au compteur iPhone. En navigation
+privée ou après un vidage du stockage, on retombe sur le tirage initial — dégradation acceptable, jamais une
+erreur.
 
 **Contigu dans la rafale, avec un trou entre les rafales.** Trois photos prises en 3 minutes se suivent
 (`IMG_3421`, `IMG_3422`, `IMG_3423`). Mais entre deux rafales séparées de cinq heures, un vrai utilisateur a
@@ -269,8 +331,8 @@ entière de photos non incluses représentant davantage de clichés.
 `9999 → 0001`. `IMG_0000` n'existe pas et ne doit jamais sortir.
 
 ```js
-function buildCounters(timeline) {
-  let n = 800 + Math.floor(Math.random() * 5700);   // 0800-6500, une fois par lot
+function buildCounters(timeline, device) {
+  let n = nextCounterStart(device);                 // repris du profil, ou tiré si première fois
   const out = [];
   timeline.forEach((ts, i) => {
     if (i > 0) {
@@ -284,6 +346,7 @@ function buildCounters(timeline) {
     if (n > 9999) n -= 9999;                        // bouclage, jamais 0000
     out.push(String(n).padStart(4, '0'));
   });
+  saveCounter(device, n);                           // le profil retient où il s'est arrêté
   return out;
 }
 ```
@@ -314,8 +377,8 @@ porte souvent la signature de l'appareil réel.
 
 ## Ordre d'exécution imposé
 
-1. `buildBatchTimeline(files.length)` → `Date[]`, une fois pour le lot.
-2. `buildCounters(timeline)` → `string[]`, une fois pour le lot (appareils à compteur).
+1. `buildBatchTimeline(files.length)` → `Date[]`, une fois pour le lot. **Ne reçoit pas le profil.**
+2. `buildCounters(timeline, device)` → `string[]`, une fois pour le lot (profils à compteur).
 3. Par image `i` : `processImageFile(files[i], { ...opts, timestamp: timeline[i], counter: counters[i] })`.
 4. Dans la fonction : `shot = options.timestamp` → EXIF **et** `buildFileName`.
 5. Résolution des collisions au niveau du lot.
@@ -343,11 +406,19 @@ L'étape 4 doit consommer la même valeur pour les deux sorties. Si le nom est c
 
 - [ ] Nom de fichier et `DateTimeOriginal` décodent vers la même date/heure, à la seconde près.
 - [ ] `IMG_####` toujours sur 4 chiffres avec zéros de tête ; `IMG_0000` jamais produit.
-- [ ] Compteur de départ dans `[0800, 6500]`, constant sur le lot.
+- [ ] Compteur de départ dans `[0800, 6500]` à la première utilisation d'un profil.
 - [ ] Contigu dans une rafale (`+1`), saut de 2–7 entre rafales, saut de 4–26 au changement de jour.
 - [ ] Compteur strictement croissant hors bouclage `9999 → 0001`.
-- [ ] Deux lots successifs ne repartent pas du même compteur.
 - [ ] Mode `strip` : nom neutre, jamais le nom d'origine.
+
+**Cloisonnement des profils**
+
+- [ ] Le même lot traité en 5 profils donne 5 séries de noms mais **des timestamps identiques**.
+- [ ] `buildBatchTimeline` n'a aucun paramètre d'appareil dans sa signature.
+- [ ] Deux lots successifs en profil iPhone : le second reprend le compteur du premier, +5 à +44.
+- [ ] Basculer iPhone → Sony → iPhone : le compteur iPhone reprend sa propre valeur, pas celle de Sony.
+- [ ] Chaque profil a une entrée distincte dans `metapurge.counters`.
+- [ ] Stockage vidé → retour au tirage initial, sans erreur.
 
 ## Points ouverts
 
