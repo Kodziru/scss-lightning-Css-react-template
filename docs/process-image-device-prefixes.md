@@ -38,7 +38,7 @@ Deux couches indépendantes, et il faut qu'elles le restent :
 | | Couche | Dépend de l'appareil ? |
 |---|---|---|
 | **A** | Chronologie du lot — rafales, écarts, fenêtre diurne, ancrage | **Non** — identique pour les 5 profils |
-| **B** | Nommage — préfixe, format, compteur | **Oui** — propre à chaque profil |
+| **B** | Identité du profil — préfixe, compteur, optique, localisation | **Oui** — propre à chaque profil |
 
 La chronologie est **la même pour tout le monde**. Un lot de 9 images produit exactement la même structure
 temporelle qu'il soit traité en profil Samsung, iPhone, Pixel, Sony ou Canon : 3 rafales, 3-4 min à
@@ -61,6 +61,89 @@ buildBatchTimeline(9)  ──►  [ 9 Date ]  ── identique pour tous les pro
 
 Mêmes instants, trois habillages. Ajouter un sixième profil à `SPOOF_DEVICES` = ajouter une ligne au catalogue
 B.2, sans toucher une seule ligne de la chronologie.
+
+## 2. Le profil comme unité autonome
+
+Un profil est un **compte** : une identité complète qui porte ses propres valeurs par défaut. Aujourd'hui
+l'information est éclatée — `SPOOF_DEVICES` ne contient que l'optique, `SPOOF_LOCATIONS` est un catalogue
+séparé que l'utilisateur choisit **indépendamment** du profil, et le nommage n'existe pas. Rien n'empêche donc
+un profil iPhone d'être associé à Tokyo sur un lot et à New York sur le suivant, ce qu'aucun compte réel ne
+fait.
+
+Le profil devient la structure unique qui rassemble tout :
+
+```js
+export const PROFILES = {
+  iphone15: {
+    label: 'iPhone 15 Pro Max',
+
+    // identité EXIF — 0th IFD
+    make: 'Apple', model: 'iPhone 15 Pro Max', software: '17.0.3',
+
+    // optique — valeurs de référence, variées par prise (voir 2.1)
+    optics: { focalLength: [6, 1], fNumber: [178, 100], exposureTime: [1, 120], iso: 50 },
+    fixedAperture: true,          // téléphone : ouverture non variable
+
+    // nommage — propre au profil (Partie B)
+    naming: { kind: 'counter', pattern: 'IMG_%04d', digits: 4, ext: '.JPG', case: 'upper' },
+
+    // ancrage géographique par défaut, surchargeable
+    defaultLocation: 'paris',
+
+    // état persistant du compte
+    counter: null,                // rempli à la première utilisation
+  },
+  // s25ultra, pixel8, sonyA7, canonR5 …
+};
+```
+
+`SPOOF_DEVICES` reste exposé comme **vue dérivée** de `PROFILES` (`make`, `model`, `optics` aplatis) pour que
+`App.tsx` continue de fonctionner sans modification. La migration se fait profil par profil, sans rupture.
+
+Ce qui appartient au profil, et ce qui n'y appartient pas :
+
+| Élément | Portée |
+|---|---|
+| `make` / `model` / `software` | profil |
+| Optique de référence | profil |
+| Schéma de nommage, extension, casse | profil |
+| Compteur de pellicule | profil, **persistant** |
+| Localisation par défaut | profil, surchargeable par lot |
+| Rafales, écarts, fenêtre diurne, ancrage | **global** — voir Partie A |
+
+### 2.1 L'optique doit varier d'une prise à l'autre
+
+Aujourd'hui les quatre valeurs optiques sont des constantes : toutes les images d'un profil iPhone sortent avec
+`ISO 50` et `1/120`, à la valeur exacte près. C'est exactement le même défaut que le compteur contigu — une
+régularité parfaite qu'aucun appareil ne produit. Et ça contredit directement la Partie A : une photo de 11 h
+et une photo de 21 h 30 ne peuvent pas partager la même exposition, la lumière n'est pas la même.
+
+Les valeurs du profil sont donc des **références**, dérivées par prise à partir de l'heure de la chronologie :
+
+- **ISO** monte quand la lumière baisse. Facteur 1 vers 13 h – 16 h, jusqu'à ×8 à ×16 vers 21 h 30, plus une
+  gigue de ±15 % pour éviter les paliers nets. Toujours arrondi aux valeurs réelles (50, 64, 80, 100, 125,
+  160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600…).
+- **Temps d'exposition** s'allonge en fin de journée : `1/120` en milieu de journée, jusqu'à `1/30` au
+  crépuscule. Toujours exprimé en fraction réelle du dénominateur normalisé.
+- **Ouverture** ne varie **pas** sur les profils téléphone (`fixedAperture: true`) — un iPhone, un Pixel et un
+  Galaxy ont une ouverture mécaniquement fixe, la faire bouger est une erreur détectable. Elle peut varier sur
+  `sonyA7` et `canonR5`, qui sont des boîtiers à objectifs.
+- **Focale** reste fixe : elle décrit l'objectif, pas la prise.
+
+Dans une même rafale (3 min d'écart), les valeurs restent très proches — même palier ISO, gigue minime. C'est
+entre deux rafales séparées de cinq heures que l'écart doit être franc.
+
+### 2.2 La localisation aussi
+
+Deux images d'un même lot ne peuvent pas porter des coordonnées GPS identiques à la décimale : un vrai
+téléphone redonne une position légèrement différente à chaque prise. Depuis `defaultLocation`, appliquer :
+
+- **Dans une rafale** : gigue de ±20 m environ — la personne n'a pas bougé, seul le GPS a dérivé.
+- **Entre deux rafales** : dérive de quelques centaines de mètres à quelques kilomètres — cinq heures ont
+  passé, la personne s'est déplacée.
+
+Le `defaultLocation` du profil reste le point d'ancrage : un compte iPhone basé à Paris produit des lots
+cohérents autour de Paris, jamais un lot à Tokyo suivi d'un lot à Londres.
 
 # Partie A — Chronologie du lot
 
@@ -411,6 +494,18 @@ L'étape 4 doit consommer la même valeur pour les deux sorties. Si le nom est c
 - [ ] Compteur strictement croissant hors bouclage `9999 → 0001`.
 - [ ] Mode `strip` : nom neutre, jamais le nom d'origine.
 
+**Configuration du profil**
+
+- [ ] ISO plus élevé sur une rafale de 21 h que sur une rafale de 13 h, même profil, même lot.
+- [ ] Valeurs ISO alignées sur les paliers réels (50, 64, 80, 100, 125, 160…), jamais un `ISO 137`.
+- [ ] Temps d'exposition allongé en fin de journée, exprimé en fraction normalisée.
+- [ ] `fNumber` strictement constant sur `iphone15`, `s25ultra`, `pixel8` ; variable sur `sonyA7`, `canonR5`.
+- [ ] `focalLength` constant sur tous les profils.
+- [ ] Dans une rafale : même palier ISO, valeurs proches mais non identiques.
+- [ ] Deux images d'un lot n'ont jamais des coordonnées GPS identiques à la décimale.
+- [ ] Gigue GPS de ~20 m dans une rafale, dérive plus large entre rafales.
+- [ ] Le profil impose son `defaultLocation` tant qu'aucune surcharge explicite n'est fournie.
+
 **Cloisonnement des profils**
 
 - [ ] Le même lot traité en 5 profils donne 5 séries de noms mais **des timestamps identiques**.
@@ -427,3 +522,9 @@ L'étape 4 doit consommer la même valeur pour les deux sorties. Si le nom est c
   la spec.
 - **Weekends et jours fériés.** L'ancrage peut tomber n'importe quel jour de la semaine. Aucune contrainte
   posée : non pertinent tant que rien dans l'EXIF ne suggère un contexte professionnel.
+- **`Flash` est câblé à `16`** (ligne 155), c'est-à-dire « flash n'a pas déclenché ». Combiné à 2.1, une prise
+  de 21 h 30 avec un ISO monté à 800 et un flash déclaré éteint reste cohérente — mais si la courbe de lumière
+  est un jour poussée plus loin, la valeur devra suivre (`25` = flash déclenché). Non traité pour l'instant.
+- **`SPOOF_LOCATIONS` reste un catalogue de 5 villes.** Les profils y pointent par clé ; si deux profils
+  partagent `defaultLocation: 'paris'`, leurs lots se ressembleront géographiquement. Attribuer une ville
+  distincte par profil est le choix par défaut recommandé.
