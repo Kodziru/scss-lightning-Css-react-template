@@ -1,137 +1,253 @@
-# Préfixes par appareil dans `processImage` (Metapurge)
+# Chronologie de lot et préfixes par appareil — `processImageFile` (Metapurge)
 
-## 1. Objectif
+Cible : `src/lib/imageProcessor.ts`.
 
-Chaque image qui sort de `processImage` doit porter **le nom de fichier réel de l'appareil qu'elle prétend être**.
-Une image « Samsung Galaxy » ne doit jamais s'appeler `IMG_0001.jpg`, et une image « iPhone » ne doit jamais
-s'appeler `20260725_143012.jpg`. Le préfixe fait partie de l'empreinte de l'appareil, exactement comme les
-tags EXIF `Make` / `Model`.
-
-Deuxième exigence, liée : `processImage` applique déjà un **décalage de temps** (time delta / offset) dans les
-métadonnées. Ce même temps décalé doit servir à construire le nom de fichier. Nom de fichier et
-`DateTimeOriginal` doivent toujours raconter la même histoire.
-
-## 2. Règle centrale
-
-> **Une seule source de vérité temporelle.**
-> Le timestamp effectif écrit dans les métadonnées (après application du delta) est **le même objet** qui est
-> passé au générateur de préfixe. Aucun appel à l'horloge système au moment de nommer le fichier.
+## 0. Ce que fait le code aujourd'hui
 
 ```
-timestampSource  ──►  applyTimeDelta()  ──►  effectiveTimestamp
-                                                │
-                                    ┌───────────┴────────────┐
-                                    ▼                        ▼
-                          writeMetadata(EXIF)        buildFileName(device, ts)
-                          DateTimeOriginal           PXL_20260725_143012123.jpg
+FileReader → dataURL → Image → canvas.drawImage → toDataURL('image/jpeg', 0.95)
+   → piexif.remove()  ─── mode 'strip' → resolve(Blob)
+   → mode 'spoof' : dump 0th/Exif/GPS → piexif.insert() → resolve(Blob)
 ```
 
-Si le delta déplace la photo au 24 juillet 23h50, le nom de fichier d'un Pixel doit être
-`PXL_20260724_235012...`, pas `PXL_20260725_...`.
-
-## 3. Catalogue des préfixes
-
-| Marque / appareil | Motif de nom | Exemple | Type |
-|---|---|---|---|
-| iPhone (iOS) | `IMG_%04d` | `IMG_4821.HEIC` | compteur |
-| iPhone (photo éditée) | `IMG_E%04d` | `IMG_E4821.JPG` | compteur (même index que l'originale) |
-| Samsung Galaxy | `%Y%m%d_%H%M%S` | `20260725_143012.jpg` | horodaté |
-| Samsung (rafale / doublon) | `%Y%m%d_%H%M%S(n)` | `20260725_143012(1).jpg` | horodaté |
-| Google Pixel | `PXL_%Y%m%d_%H%M%S%3f` | `PXL_20260725_143012123.jpg` | horodaté + millisecondes |
-| Xiaomi / Redmi / POCO | `IMG_%Y%m%d_%H%M%S` | `IMG_20260725_143012.jpg` | horodaté |
-| Huawei / Honor | `IMG_%Y%m%d_%H%M%S` | `IMG_20260725_143012.jpg` | horodaté |
-| OnePlus | `IMG_%Y%m%d_%H%M%S` | `IMG_20260725_143012.jpg` | horodaté |
-| Oppo / Vivo / Realme | `IMG_%Y%m%d_%H%M%S` | `IMG_20260725_143012.jpg` | horodaté |
-| Motorola | `IMG_%Y%m%d_%H%M%S%3f` | `IMG_20260725_143012456.jpg` | horodaté + ms |
-| Sony (Xperia / Alpha) | `DSC_%05d` | `DSC_04821.JPG` | compteur |
-| Nokia | `IMG_%Y%m%d_%H%M%S` | `IMG_20260725_143012.jpg` | horodaté |
-| Capture d'écran Samsung | `Screenshot_%Y%m%d-%H%M%S_App` | `Screenshot_20260725-143012_Chrome.jpg` | horodaté |
-| Capture d'écran iOS | `IMG_%04d` | `IMG_4822.PNG` | compteur |
-| Fallback / appareil inconnu | `IMG_%Y%m%d_%H%M%S` | `IMG_20260725_143012.jpg` | horodaté |
-
-Extensions par défaut : iPhone → `.HEIC` (ou `.JPG` si le pipeline sort du JPEG), tout le reste → `.jpg`.
-La casse compte : iOS écrit en **majuscules** (`IMG_4821.HEIC`), Android en **minuscules** (`.jpg`).
-
-## 4. Deux familles, deux comportements face au delta
-
-### 4.1 Appareils horodatés (Samsung, Pixel, Xiaomi, Huawei, OnePlus…)
-
-Le delta est **visible directement dans le nom**. Le formatage se fait en **heure locale de l'appareil**,
-c'est-à-dire avec le même offset que celui écrit dans `OffsetTimeOriginal` — jamais en UTC, sinon le nom
-et l'EXIF divergent d'autant d'heures que le fuseau.
-
-### 4.2 Appareils à compteur (iPhone, Sony)
-
-Le nom ne contient pas de date, donc le delta n'y apparaît pas. La contrainte devient l'**ordre** :
-
-- Les images d'un même lot sont triées par `effectiveTimestamp` croissant, **après** application du delta.
-- Le compteur est attribué dans cet ordre, de façon monotone.
-- Conséquence : si le delta réordonne deux photos, leurs numéros `IMG_xxxx` doivent être réordonnés aussi.
-  Un `IMG_4830` daté plus tôt qu'un `IMG_4829` est une incohérence détectable au premier coup d'œil.
-- Le compteur boucle à `9999` → repart à `0001` (comportement réel d'iOS).
-- Une variante éditée réutilise l'index de son originale avec le préfixe `IMG_E`.
-
-## 5. Contrat d'API à intégrer
+Le temps est tiré ligne 137-141 :
 
 ```js
-// device : identifiant du profil d'appareil déjà sélectionné dans processImage
-// timestamp : effectiveTimestamp, APRÈS applyTimeDelta
-// index : compteur du lot (uniquement pour les appareils à compteur)
-// variant : 'photo' | 'screenshot' | 'edited'
-buildFileName({ device, timestamp, index, variant, ext }) -> string
+const now = new Date();
+now.setDate(now.getDate() - Math.floor(Math.random() * 14));
+```
 
-getDevicePrefixSpec(device) -> {
-  kind: 'timestamped' | 'counter',
-  pattern: string,
-  extension: string,
-  case: 'upper' | 'lower',
+Soit un recul de **0 à 13 jours au hasard, indépendant pour chaque image**, l'heure de la journée restant
+l'heure réelle du traitement. La chaîne formatée part à l'identique dans `DateTime`, `DateTimeOriginal` et
+`DateTimeDigitized`.
+
+Deux défauts que ce document corrige :
+
+1. **Dispersion incohérente.** Dix images importées ensemble ressortent éparpillées sur deux semaines, mais
+   toutes exactement à la même heure de la journée. C'est le contraire d'un vrai appareil : les vraies photos
+   sont groupées en rafales de quelques minutes, séparées par des heures.
+2. **Le timestamp est jeté.** `now` est une variable locale à la closure. La fonction résout un `Blob` nu :
+   rien en aval ne peut connaître la date écrite, donc rien ne peut nommer le fichier en cohérence avec elle.
+
+---
+
+# Partie A — Chronologie du lot
+
+## A.1 Modèle
+
+Les images sont traitées **dans leur ordre d'import** et regroupées par **clusters de 3** — un cluster = une
+rafale, l'utilisateur qui prend trois photos de la même scène.
+
+- **Dans un cluster** : écart de **3 à 4 minutes** entre deux images consécutives.
+- **Entre deux clusters** : écart de **4 à 6 heures**.
+- L'étalement total est plafonné par une **fenêtre** qui dépend du nombre d'images.
+
+```
+ cluster 1              cluster 2              cluster 3
+ ●--3min--●--4min--●    ●--3min--●--3min--●    ●--4min--●--3min--●
+                    └──── 5h12 ────┘       └──── 4h48 ────┘
+ └──────────────────── étalement total ≤ fenêtre ────────────────────┘
+```
+
+## A.2 Fenêtre selon le volume
+
+| Nombre d'images | Fenêtre | Clusters | Écart inter-cluster |
+|---|---|---|---|
+| 1 – 9 | **14 h** | 1 – 3 | 4 – 6 h (naturel) |
+| 10 – 18 | **24 h** | 4 – 6 | 4 – 6 h, resserré si nécessaire |
+| 19 et + | **48 h** | 7 et + | resserré pour tenir dans 48 h |
+
+Règle de resserrement : l'écart nominal est tiré dans `[4h, 6h]`. Si `(nClusters - 1) × 6h` dépasse la
+fenêtre, l'écart est recalculé en `fenêtre / (nClusters - 1)` avec une gigue de ±20 %, plancher à **30 min**
+pour que deux clusters ne se chevauchent jamais.
+
+Vérification aux bornes :
+
+| N | Clusters | Écarts | Nominal max | Fenêtre | Résultat |
+|---|---|---|---|---|---|
+| 9 | 3 | 2 | 12 h | 14 h | tient, 4–6 h conservés |
+| 12 | 4 | 3 | 18 h | 24 h | tient, 4–6 h conservés |
+| 18 | 6 | 5 | 30 h | 24 h | resserré à ~4 h 48 |
+| 19 | 7 | 6 | 36 h | 48 h | tient, 4–6 h conservés |
+| 60 | 20 | 19 | 114 h | 48 h | resserré à ~2 h 31 |
+
+Le modèle se dégrade proprement : plus il y a d'images, plus les rafales se rapprochent, jamais l'inverse.
+
+## A.3 Ancrage
+
+La chronologie est construite **à rebours** depuis une ancre : la dernière image du lot est datée
+`maintenant − aléatoire(1 h … 48 h)`, puis on remonte le temps cluster par cluster. Le lot est donc
+« récent mais pas à la seconde du traitement », et l'ordre d'import est préservé en ordre chronologique
+croissant.
+
+## A.4 Le point structurel : un planificateur de lot
+
+`processImageFile` est appelée **par fichier** et ne sait rien du lot. Une chronologie ne peut pas se calculer
+dans cette fonction. Il faut la sortir :
+
+```js
+// nouveau, exporté depuis imageProcessor.ts
+buildBatchTimeline(count: number): Date[]
+
+// ProcessOptions gagne un champ
+interface ProcessOptions {
+  mode: 'strip' | 'spoof';
+  spoofDevice?: string;
+  spoofLocation?: string;
+  customLocation?: {...};
+  timestamp?: Date;        // ← fourni par la chronologie du lot
 }
 ```
 
-Le catalogue de la section 3 vit dans **une table de données unique**, pas dans des `if/else` dispersés :
-ajouter un appareil = ajouter une ligne, sans toucher à `processImage`.
+L'appelant calcule la chronologie une fois, puis passe `timeline[i]` à chaque appel. Les lignes 137-138
+disparaissent au profit de `const shot = options.timestamp ?? fallbackRandom()`, le fallback conservant
+l'ancien comportement quand la fonction est appelée seule.
 
-## 6. Point d'insertion dans `processImage`
+## A.5 Pseudo-code
 
-Ordre obligatoire à respecter :
+```js
+const MIN = 60_000, HOUR = 60 * MIN;
 
-1. Résolution du profil d'appareil (`Make` / `Model`).
-2. Calcul de `effectiveTimestamp` = source + delta *(fonctionnalité déjà présente)*.
-3. Écriture des métadonnées avec `effectiveTimestamp`.
-4. **`buildFileName(...)` avec exactement ce même `effectiveTimestamp`** ← nouveau
-5. Résolution des collisions.
-6. Écriture / renommage du fichier de sortie.
+function buildBatchTimeline(count) {
+  const window = count <= 9 ? 14 * HOUR : count <= 18 ? 24 * HOUR : 48 * HOUR;
+  const nClusters = Math.ceil(count / 3);
+  const nGaps = Math.max(1, nClusters - 1);
 
-L'étape 4 doit être **après** 2, et consommer sa sortie. Si le nom est calculé avant le delta, le bug est
-silencieux : les fichiers sortent avec l'heure d'origine et trahissent le traitement.
+  // écart nominal 4-6 h, resserré si le lot ne tient pas dans la fenêtre
+  const compress = nGaps * 6 * HOUR > window;
+  const gapFor = () => compress
+    ? Math.max(30 * MIN, (window / nGaps) * (0.8 + Math.random() * 0.4))
+    : 4 * HOUR + Math.random() * 2 * HOUR;
 
-## 7. Collisions
+  // durée de chaque rafale, puis somme totale
+  const clusters = [];
+  for (let c = 0; c < nClusters; c++) {
+    const size = Math.min(3, count - c * 3);
+    const gaps = Array.from({ length: size - 1 }, () => 3 * MIN + Math.random() * MIN);
+    clusters.push({ size, gaps });
+  }
+  const interGaps = Array.from({ length: nClusters - 1 }, gapFor);
 
-Deux images sur la même seconde produisent le même nom sur les appareils horodatés sans millisecondes.
-Stratégie, par ordre de préférence :
+  const span = clusters.reduce((s, c) => s + c.gaps.reduce((a, b) => a + b, 0), 0)
+             + interGaps.reduce((a, b) => a + b, 0);
 
-1. Suffixe entre parenthèses, façon Samsung : `20260725_143012(1).jpg`.
-2. Pour les appareils avec millisecondes (Pixel, Motorola), incrémenter les millisecondes plutôt que suffixer.
-3. Jamais de suffixe aléatoire type `_a7f3` : aucun téléphone ne nomme comme ça.
+  // ancrage : la dernière image tombe entre 1 h et 48 h avant maintenant
+  let t = Date.now() - (HOUR + Math.random() * 47 * HOUR) - span;
 
-Le registre des noms déjà émis est tenu **au niveau du lot**, pas par image.
+  const out = [];
+  clusters.forEach((c, ci) => {
+    for (let i = 0; i < c.size; i++) {
+      out.push(new Date(t));
+      if (i < c.size - 1) t += c.gaps[i];
+    }
+    if (ci < interGaps.length) t += interGaps[ci];
+  });
+  return out;
+}
+```
 
-## 8. Checklist de validation
+## A.6 Écriture EXIF
 
-- [ ] Un lot « iPhone » ne produit que des `IMG_%04d` avec extension en majuscules.
-- [ ] Un lot « Samsung » ne produit que des `%Y%m%d_%H%M%S`.
-- [ ] Delta de `+3 jours` → la date dans le nom des appareils horodatés bouge de 3 jours.
-- [ ] Delta négatif franchissant minuit → le jour dans le nom recule (pas seulement l'heure).
-- [ ] Nom de fichier et `DateTimeOriginal` décodent vers la même date/heure locale, à la seconde près.
-- [ ] Fuseau non-UTC : le nom suit `OffsetTimeOriginal`, pas UTC.
-- [ ] Appareils à compteur : ordre des index = ordre des timestamps décalés.
-- [ ] Deux images à la même seconde → deux noms distincts, tous deux plausibles pour l'appareil.
-- [ ] Appareil inconnu → fallback `IMG_%Y%m%d_%H%M%S`, jamais de nom vide ni de nom d'origine conservé.
+`shot` remplace `now` dans le formatage existant, inchangé pour le reste :
 
-## 9. Ce qui reste à faire côté code
+```js
+const dateStr = `${shot.getFullYear()}:${pad(shot.getMonth()+1)}:${pad(shot.getDate())} ` +
+                `${pad(shot.getHours())}:${pad(shot.getMinutes())}:${pad(shot.getSeconds())}`;
+```
 
-Ce document est la spec. L'intégration dans `processImage` n'a **pas** pu être écrite : le dépôt courant
-(`scss-lightning-css-react-template`) est le template React de base — `src/` ne contient que `App.jsx`,
-`main.jsx`, les feuilles de style et `react.svg`. Il n'y a aucun fichier Metapurge ni aucun `processImage`
-dans cet arbre. Pour brancher le code, il faut m'ouvrir le dépôt Metapurge ; je n'aurai alors besoin de lire
-que le fichier de `processImage` et son point d'écriture de sortie.
+Toujours les trois mêmes tags : `ImageIFD.DateTime`, `ExifIFD.DateTimeOriginal`, `ExifIFD.DateTimeDigitized`.
+
+---
+
+# Partie B — Préfixes par appareil
+
+## B.1 Règle centrale
+
+> Le `Date` de la chronologie est **le même objet** qui alimente l'EXIF et le nom de fichier.
+> Aucun appel à l'horloge système au moment de nommer.
+
+```
+timeline[i] ──┬──► writeMetadata(EXIF)
+              └──► buildFileName(device, timeline[i], i)
+```
+
+Un décalage entre le nom et `DateTimeOriginal` est le premier indice qu'un observateur remarque.
+
+## B.2 Catalogue — les 5 profils réellement présents dans `SPOOF_DEVICES`
+
+| Clé | Make / Model | Motif de nom | Exemple | Type |
+|---|---|---|---|---|
+| `iphone15` | Apple / iPhone 15 Pro Max | `IMG_%04d` | `IMG_4821.JPG` | compteur |
+| `s25ultra` | samsung / SM-S938B | `%Y%m%d_%H%M%S` | `20260724_143012.jpg` | horodaté |
+| `pixel8` | Google / Pixel 8 Pro | `PXL_%Y%m%d_%H%M%S%3f` | `PXL_20260724_143012123.jpg` | horodaté + ms |
+| `sonyA7` | SONY / ILCE-7M3 | `DSC%05d` | `DSC04821.JPG` | compteur |
+| `canonR5` | Canon / Canon EOS R5 | `IMG_%04d` | `IMG_4821.JPG` | compteur |
+
+Casse : Apple, Sony et Canon écrivent en **majuscules** ; Samsung et Google en **minuscules**. La sortie
+étant toujours du JPEG (contrainte du canvas), l'extension est `.JPG` ou `.jpg` selon la marque — pas de
+`.HEIC`, qui mentirait sur le contenu réel du fichier.
+
+## B.3 Deux familles face à la chronologie
+
+**Horodatés** (`s25ultra`, `pixel8`) — la date du cluster apparaît directement dans le nom. Trois images
+d'une même rafale donnent `20260724_143012`, `20260724_143318`, `20260724_143641` : trois minutes d'écart,
+visibles, cohérentes avec l'EXIF.
+
+**À compteur** (`iphone15`, `sonyA7`, `canonR5`) — pas de date dans le nom, la contrainte devient l'**ordre**.
+La chronologie étant construite croissante par ordre d'import, l'index suit simplement `i` : `IMG_4821`,
+`IMG_4822`, `IMG_4823`. Le compteur démarre à une valeur aléatoire plausible (1000–8000) tirée **une fois par
+lot**, et boucle à 9999 → 0001.
+
+## B.4 Collisions
+
+Deux images à la même seconde sont impossibles avec des écarts intra-cluster de 3 minutes, mais le garde-fou
+reste utile si la fenêtre est un jour resserrée davantage : suffixe entre parenthèses façon Samsung
+(`20260724_143012(1).jpg`), ou incrément des millisecondes pour le Pixel. Jamais de suffixe aléatoire
+type `_a7f3` : aucun téléphone ne nomme comme ça. Le registre des noms émis est tenu au niveau du lot.
+
+## B.5 Le nom doit sortir de la fonction
+
+`processImageFile` résout un `Blob`, sans nom. Pour que le préfixe serve à quelque chose, la signature change :
+
+```js
+processImageFile(file, options) -> Promise<{ blob: Blob, fileName: string }>
+```
+
+Le `fileName` est construit à partir de `options.spoofDevice` et `options.timestamp`. En mode `strip`, pas de
+profil d'appareil : on retombe sur un nom neutre `IMG_%Y%m%d_%H%M%S.jpg`, jamais le nom d'origine — qui, lui,
+porte souvent la signature de l'appareil réel.
+
+---
+
+## Ordre d'exécution imposé
+
+1. `buildBatchTimeline(files.length)` → `Date[]`, une fois pour le lot.
+2. Tirage du compteur de départ, une fois pour le lot (appareils à compteur).
+3. Par image `i` : `processImageFile(files[i], { ...opts, timestamp: timeline[i] })`.
+4. Dans la fonction : `shot = options.timestamp` → EXIF **et** `buildFileName`.
+5. Résolution des collisions au niveau du lot.
+6. Téléchargement sous le nom généré.
+
+L'étape 4 doit consommer la même valeur pour les deux sorties. Si le nom est calculé ailleurs à partir d'un
+`new Date()`, le bug est silencieux et l'incohérence est publiée.
+
+## Checklist de validation
+
+- [ ] 3 images → un seul cluster, écarts de 3–4 min, aucun saut d'heures.
+- [ ] 6 images → 2 clusters, écart inter-cluster entre 4 h et 6 h.
+- [ ] 9 images → étalement total ≤ 14 h.
+- [ ] 12 images → étalement total ≤ 24 h.
+- [ ] 30 images → étalement total ≤ 48 h, écarts resserrés, jamais < 30 min.
+- [ ] Ordre chronologique strictement croissant = ordre d'import, quel que soit N.
+- [ ] Dernière image du lot antérieure à `maintenant`, d'au moins 1 h.
+- [ ] Nom de fichier et `DateTimeOriginal` décodent vers la même date/heure, à la seconde près.
+- [ ] Appareils à compteur : index croissants, compteur de départ constant sur le lot.
+- [ ] Mode `strip` : nom neutre, jamais le nom d'origine.
+
+## Points ouverts
+
+- **Heures nocturnes.** L'ancrage aléatoire peut placer une rafale à 4 h du matin. Contraindre les clusters à
+  une plage 8 h – 23 h rendrait le lot plus plausible, au prix d'un étalement moins régulier. Non tranché.
+- **`OffsetTimeOriginal`** n'est écrit nulle part aujourd'hui ; les dates sont donc en heure locale implicite.
+  Cohérent tant que le nom de fichier est formaté avec les mêmes accesseurs locaux (`getHours()`), ce que fait
+  la spec.
